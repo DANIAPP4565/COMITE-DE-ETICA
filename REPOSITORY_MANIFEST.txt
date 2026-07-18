@@ -1,0 +1,47 @@
+CEI NEXUS - ARCHIVOS QUE DEBEN ESTAR EN LA RAÍZ DEL REPOSITORIO
+
+app.py
+requirements.txt
+runtime.txt
+Dockerfile
+docker-compose.yml
+.env.example
+README.md
+SECURITY.md
+CHANGELOG.md
+
+cei_core/
+  __init__.py
+  config.py
+  audit.py
+  db.py
+  digital_sign.py
+  domain.py
+  kb.py
+  reports.py
+  security.py
+  storage.py
+  workflow.py
+
+assets/
+  styles.css
+
+config/
+  poe_workflow.yaml
+
+data/
+  sources.json
+  knowledge_base/Guia_etica_revision_ensayos_clinicos.pdf
+
+scripts/
+  create_admin.py
+  generate_env.py
+  migrate.py
+  migrate_sqlite_to_postgres.py
+  preflight.py
+
+.streamlit/
+  config.toml
+  secrets.toml.example
+
+No debe subirse únicamente app.py. El directorio cei_core completo es obligatorio.
