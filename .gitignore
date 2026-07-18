@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+*.log
+.pytest_cache/
+.ruff_cache/
+data/cei_nexus.db
+data/smoke_review.pdf
+.streamlit/secrets.toml
