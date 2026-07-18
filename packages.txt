@@ -1,1 +1,0 @@
-# No se requieren paquetes apt para esta compilación.
