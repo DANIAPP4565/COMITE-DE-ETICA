@@ -1,2 +1,0 @@
-streamlit==1.59.2
--r requirements.txt
