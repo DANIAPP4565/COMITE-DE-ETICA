@@ -1,0 +1,73 @@
+# CEI Nexus — stack completo autocontenido.
+# Un solo comando lo levanta todo:  docker compose up
+#
+#   - db     : PostgreSQL (la base de datos robusta)
+#   - minio  : almacenamiento S3 para documentos cifrados
+#   - app    : la aplicación Streamlit (crea el esquema sola en el primer arranque)
+#
+# No hay que editar nada para probarlo. Los valores por defecto viven en .env.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cei}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cei}
+      POSTGRES_DB: ${POSTGRES_DB:-cei}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cei} -d ${POSTGRES_DB:-cei}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-cei-access}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-cei-secret-key}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9001:9001"   # consola web de MinIO (opcional): http://localhost:9001
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      # --- Base de datos (una sola URL) ---
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cei}:${POSTGRES_PASSWORD:-cei}@db:5432/${POSTGRES_DB:-cei}
+      AUTO_INIT_DB: "true"
+      SEED_DEMO_DATA: "${SEED_DEMO_DATA:-true}"
+      # --- Pool de conexiones ---
+      DB_POOL_MIN_SIZE: "1"
+      DB_POOL_MAX_SIZE: "10"
+      # --- Almacenamiento de documentos (MinIO, compatible con S3) ---
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-cei-documents}
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-cei-access}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-cei-secret-key}
+      S3_OBJECT_LOCK_ENABLED: "false"
+      S3_VERIFY_TLS: "false"
+      DOCUMENT_MASTER_KEY_B64: ${DOCUMENT_MASTER_KEY_B64}
+    ports:
+      - "8501:8501"   # la app:  http://localhost:8501
+
+volumes:
+  db_data:
+  minio_data:
