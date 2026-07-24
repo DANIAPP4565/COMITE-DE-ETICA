@@ -36,7 +36,7 @@ import uuid
 
 import streamlit as st
 
-BUILD_ID = "CEI-NEXUS-FIX8-POOL-AUTOINIT-20260719"
+BUILD_ID = "CEI-NEXUS-FIX9-PROTOTYPE-NODB-20260723"
 
 try:
     import pandas as pd
@@ -113,6 +113,287 @@ except ImportError as exc:
 BASE_DIR = EMBEDDED_ROOT
 CSS_PATH = BASE_DIR / "assets" / "styles.css"
 LOCAL_GUIDE = KB_DIR / "Guia_etica_revision_ensayos_clinicos.pdf"
+
+# -----------------------------------------------------------------------------
+# MODO PROTOTIPO SIN BASE DE DATOS EXTERNA
+# -----------------------------------------------------------------------------
+# Por defecto esta compilación NO intenta conectarse a PostgreSQL. La interfaz
+# utiliza una base SQLite local y efímera, exclusivamente para poder recorrer el
+# diseño, probar formularios y visualizar datos de demostración.
+#
+# Para volver al modo productivo, configure PROTOTYPE_MODE=false en Secrets o
+# variables de entorno y configure DATABASE_URL / DATABASE_ADMIN_URL.
+PROTOTYPE_MODE = str(get_config("PROTOTYPE_MODE", "true") or "true").strip().lower() in {
+    "1", "true", "yes", "on", "si", "sí"
+}
+
+if PROTOTYPE_MODE:
+    import sqlite3 as _prototype_sqlite3
+    import tempfile as _prototype_tempfile
+
+    _PROTOTYPE_DB_PATH = Path(_prototype_tempfile.gettempdir()) / "cei_nexus_prototype_fix9.sqlite3"
+    _PROTOTYPE_DEFAULTS = {
+        "committee_name": "Comité de Ética en Investigación — PROTOTIPO",
+        "quorum_min_absolute": "5",
+        "require_non_scientific": "1",
+        "require_independent": "1",
+        "require_community": "1",
+        "sae_target_business_days": "2",
+        "protocol_target_days": "60",
+        "first_observation_target_days": "9",
+        "training_alert_days": "60",
+        "document_retention_years": "10",
+        "institution_location": "Argentina",
+    }
+
+    def _prototype_conn():
+        conn = _prototype_sqlite3.connect(_PROTOTYPE_DB_PATH, timeout=5)
+        conn.row_factory = _prototype_sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def _prototype_schema_and_seed() -> None:
+        conn = _prototype_conn()
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, full_name TEXT,
+                    email TEXT, role TEXT, password_hash TEXT, active INTEGER DEFAULT 1,
+                    discipline TEXT, is_scientific INTEGER DEFAULT 1,
+                    is_independent INTEGER DEFAULT 0, is_community INTEGER DEFAULT 0,
+                    created_at TEXT, last_login TEXT
+                );
+                CREATE TABLE IF NOT EXISTS protocols (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE, title TEXT,
+                    principal_investigator TEXT, sponsor TEXT, institution TEXT, phase TEXT,
+                    study_type TEXT, risk_level TEXT, vulnerable_population TEXT, status TEXT,
+                    current_stage TEXT DEFAULT 'Recibido', stage_entered_at TEXT,
+                    workflow_version TEXT, submitted_at TEXT, first_observation_at TEXT,
+                    final_decision_at TEXT, current_version TEXT, assigned_reviewer_id INTEGER,
+                    created_by INTEGER, notes TEXT, created_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, protocol_id INTEGER, category TEXT,
+                    version TEXT, filename TEXT, object_key TEXT, object_version TEXT,
+                    plaintext_sha256 TEXT, ciphertext_sha256 TEXT, content_type TEXT,
+                    size_bytes INTEGER, encryption_key_id TEXT, retention_until TEXT,
+                    legal_hold INTEGER DEFAULT 0, uploaded_at TEXT, uploaded_by INTEGER,
+                    is_current INTEGER DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, protocol_id INTEGER, reviewer_id INTEGER,
+                    review_type TEXT, status TEXT, started_at TEXT, completed_at TEXT,
+                    total_score REAL, recommendation TEXT, general_comments TEXT, created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS review_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, review_id INTEGER, domain TEXT,
+                    item_key TEXT, item_text TEXT, answer TEXT, severity TEXT, comment TEXT
+                );
+                CREATE TABLE IF NOT EXISTS meetings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, meeting_date TEXT,
+                    status TEXT, notes TEXT, created_by INTEGER, created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS attendance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id INTEGER, member_id INTEGER,
+                    present INTEGER DEFAULT 0, conflict_declared INTEGER DEFAULT 0,
+                    recused INTEGER DEFAULT 0, vote TEXT
+                );
+                CREATE TABLE IF NOT EXISTS safety_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, protocol_id INTEGER, event_type TEXT,
+                    participant_code TEXT, event_date TEXT, awareness_date TEXT, reported_at TEXT,
+                    seriousness TEXT, expectedness TEXT, relatedness TEXT, description TEXT,
+                    status TEXT, followup_due TEXT, created_by INTEGER, created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS deviations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, protocol_id INTEGER, participant_code TEXT,
+                    deviation_date TEXT, deviation_type TEXT, severity TEXT,
+                    safety_impact INTEGER DEFAULT 0, data_integrity_impact INTEGER DEFAULT 0,
+                    description TEXT, corrective_action TEXT, preventive_action TEXT,
+                    status TEXT, due_date TEXT, closed_at TEXT, created_by INTEGER, created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS amendments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, protocol_id INTEGER, amendment_code TEXT,
+                    submitted_at TEXT, classification TEXT, safety_impact INTEGER DEFAULT 0,
+                    scientific_impact INTEGER DEFAULT 0, operational_impact INTEGER DEFAULT 0,
+                    summary TEXT, status TEXT, decision_at TEXT, created_by INTEGER, created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, protocol_id INTEGER, visit_date TEXT,
+                    visit_type TEXT, category TEXT, severity TEXT, numerator INTEGER,
+                    denominator INTEGER, description TEXT, evidence_reference TEXT, capa TEXT,
+                    due_date TEXT, status TEXT, investigator_response TEXT, closed_at TEXT,
+                    created_by INTEGER, created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS training (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, course_name TEXT,
+                    provider TEXT, issued_at TEXT, expires_at TEXT, certificate_reference TEXT,
+                    created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL, description TEXT
+                );
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT,
+                    entity_type TEXT, entity_id TEXT, detail_json TEXT, created_at TEXT
+                );
+                """
+            )
+            count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            if count == 0:
+                now = datetime.now().replace(microsecond=0).isoformat()
+                demo_users = [
+                    ("admin", "Administrador CEI", "admin@demo.local", "Administrador", "Gestión", 1, 1, 0),
+                    ("secretaria", "Secretaría Técnica", "secretaria@demo.local", "Secretaría", "Gestión de investigación", 1, 0, 0),
+                    ("presidente", "Presidencia del CEI", "presidencia@demo.local", "Presidencia", "Bioética", 1, 1, 0),
+                    ("revisor", "Revisor Clínico", "revisor@demo.local", "Revisor", "Medicina", 1, 0, 0),
+                    ("externo", "Miembro Externo", "externo@demo.local", "Revisor", "Metodología", 1, 1, 0),
+                    ("comunidad", "Representante Comunitario", "comunidad@demo.local", "Revisor", "Comunidad", 0, 1, 1),
+                    ("monitor", "Monitor de Calidad", "monitor@demo.local", "Monitor", "Calidad", 1, 0, 0),
+                    ("investigador", "Investigador Principal", "ip@demo.local", "Investigador", "Investigación clínica", 1, 0, 0),
+                ]
+                conn.executemany(
+                    """INSERT INTO users(username,full_name,email,role,password_hash,active,discipline,
+                       is_scientific,is_independent,is_community,created_at)
+                       VALUES(?,?,?,?, 'PROTOTYPE',1,?,?,?,?,?)""",
+                    [(u, n, e, r, d, sci, ind, com, now) for u,n,e,r,d,sci,ind,com in demo_users],
+                )
+                revisor_id = conn.execute("SELECT id FROM users WHERE username='revisor'").fetchone()[0]
+                ip_id = conn.execute("SELECT id FROM users WHERE username='investigador'").fetchone()[0]
+                admin_id = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+                today = date.today()
+                protos = [
+                    ("CEI-2026-001", "Ensayo pragmático de intervención digital para adherencia antihipertensiva", "Dra. Laura Méndez", "Institución Académica", "Hospital General", "N/A", "Investigación con IA / salud digital", "Moderado", "Personas mayores", "En revisión", (today-timedelta(days=18)).isoformat(), None, None, "1.0"),
+                    ("CEI-2026-002", "Registro prospectivo de rigidez arterial y resultados cardiovasculares", "Dr. Martín Ruiz", "Investigador iniciado", "Centro Cardiovascular", "N/A", "Observacional", "Bajo", "", "Observado", (today-timedelta(days=35)).isoformat(), (today-timedelta(days=27)).isoformat(), None, "1.2"),
+                    ("CEI-2026-003", "Estudio fase III de una terapia cardiometabólica", "Dra. Ana Torres", "Pharma Demo", "Hospital Universitario", "III", "Ensayo clínico farmacológico", "Alto", "Enfermedad crónica", "Aprobado", (today-timedelta(days=72)).isoformat(), (today-timedelta(days=65)).isoformat(), (today-timedelta(days=20)).isoformat(), "2.0"),
+                    ("CEI-2026-004", "Validación clínica de una herramienta de apoyo a decisión con inteligencia artificial", "Dr. Pablo Ferrer", "Centro de Innovación", "Red Asistencial", "N/A", "Investigación con IA / salud digital", "Moderado", "", "Respuesta recibida", (today-timedelta(days=11)).isoformat(), (today-timedelta(days=5)).isoformat(), None, "1.1"),
+                ]
+                for row in protos:
+                    conn.execute(
+                        """INSERT INTO protocols(code,title,principal_investigator,sponsor,institution,phase,study_type,
+                           risk_level,vulnerable_population,status,current_stage,stage_entered_at,workflow_version,
+                           submitted_at,first_observation_at,final_decision_at,current_version,assigned_reviewer_id,
+                           created_by,notes,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (*row[:10], row[9], now, "2026.1", row[10], row[11], row[12], row[13], revisor_id, ip_id, "Registro demostrativo del modo prototipo.", now, now),
+                    )
+                p1 = conn.execute("SELECT id FROM protocols WHERE code='CEI-2026-001'").fetchone()[0]
+                p2 = conn.execute("SELECT id FROM protocols WHERE code='CEI-2026-002'").fetchone()[0]
+                p3 = conn.execute("SELECT id FROM protocols WHERE code='CEI-2026-003'").fetchone()[0]
+                # Evaluaciones de ejemplo
+                cur = conn.execute(
+                    """INSERT INTO reviews(protocol_id,reviewer_id,review_type,status,started_at,completed_at,total_score,recommendation,general_comments,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (p2,revisor_id,"Revisión inicial","Completada",(today-timedelta(days=10)).isoformat(),(today-timedelta(days=8)).isoformat(),82.0,"Solicitar modificaciones","Consentimiento y plan estadístico requieren aclaraciones.",now),
+                )
+                rid = cur.lastrowid
+                conn.executemany(
+                    """INSERT INTO review_items(review_id,domain,item_key,item_text,answer,severity,comment) VALUES(?,?,?,?,?,?,?)""",
+                    [
+                        (rid,"Consentimiento","CI-01","Describe riesgos y beneficios en lenguaje comprensible","Parcial","Mayor","Simplificar lenguaje y explicitar alternativas."),
+                        (rid,"Metodología","MET-02","Justificación del tamaño muestral","Cumple","Menor","Adecuado."),
+                        (rid,"Privacidad","DAT-03","Plan de minimización y protección de datos","Cumple","Menor","Adecuado para revisión inicial."),
+                    ],
+                )
+                # Seguridad / desvíos
+                conn.execute(
+                    """INSERT INTO safety_events(protocol_id,event_type,participant_code,event_date,awareness_date,reported_at,seriousness,expectedness,relatedness,description,status,followup_due,created_by,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (p3,"EAS","P-014",(today-timedelta(days=9)).isoformat(),(today-timedelta(days=8)).isoformat(),(today-timedelta(days=7)).isoformat(),"Hospitalización","Inesperado","Posible","Hospitalización no programada; caso demostrativo.","En seguimiento",(today+timedelta(days=7)).isoformat(),admin_id,now),
+                )
+                conn.execute(
+                    """INSERT INTO deviations(protocol_id,participant_code,deviation_date,deviation_type,severity,safety_impact,data_integrity_impact,description,corrective_action,preventive_action,status,due_date,created_by,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (p1,"P-022",(today-timedelta(days=6)).isoformat(),"Ventana de visita","Moderada",0,1,"Visita realizada fuera de ventana protocolizada.","Revisión del caso y documentación.","Alerta automática de agenda.","Abierto",(today+timedelta(days=10)).isoformat(),admin_id,now),
+                )
+                conn.execute(
+                    """INSERT INTO amendments(protocol_id,amendment_code,submitted_at,classification,safety_impact,scientific_impact,operational_impact,summary,status,decision_at,created_by,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (p1,"EM-01",(today-timedelta(days=4)).isoformat(),"Sustancial",0,1,1,"Actualización del procedimiento digital y del consentimiento.","En revisión",None,admin_id,now),
+                )
+                conn.execute(
+                    """INSERT INTO findings(protocol_id,visit_date,visit_type,category,severity,numerator,denominator,description,evidence_reference,capa,due_date,status,investigator_response,created_by,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (p3,(today-timedelta(days=14)).isoformat(),"Monitoreo remoto","Documentación esencial","Menor",2,40,"Dos documentos requieren actualización de versión.","TMF sección 05","Actualizar y reforzar control de versiones.",(today+timedelta(days=16)).isoformat(),"CAPA abierta","",admin_id,now),
+                )
+                # Sesión de ejemplo
+                mid = conn.execute(
+                    "INSERT INTO meetings(title,meeting_date,status,notes,created_by,created_at) VALUES(?,?,?,?,?,?)",
+                    ("Reunión ordinaria demostrativa",(today-timedelta(days=7)).isoformat(),"Quórum válido","Sesión precargada para visualizar el módulo.",admin_id,now),
+                ).lastrowid
+                members = conn.execute("SELECT id FROM users WHERE role IN ('Presidencia','Revisor') ORDER BY id").fetchall()
+                for i,m in enumerate(members):
+                    conn.execute("INSERT INTO attendance(meeting_id,member_id,present,conflict_declared,recused,vote) VALUES(?,?,?,?,?,?)",(mid,m[0],1,1 if i==2 else 0,1 if i==2 else 0,"A favor" if i!=2 else None))
+                # Capacitación
+                train_users = conn.execute("SELECT id,username FROM users WHERE role IN ('Revisor','Presidencia','Monitor')").fetchall()
+                for idx,m in enumerate(train_users):
+                    conn.execute(
+                        """INSERT INTO training(user_id,course_name,provider,issued_at,expires_at,certificate_reference,created_at)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (m[0],"Buenas Prácticas Clínicas ICH E6(R3)","Programa institucional",(today-timedelta(days=300-idx*20)).isoformat(),(today+timedelta(days=35+idx*70)).isoformat(),f"CERT-{m[1].upper()}-2026",now),
+                    )
+            for key, value in _PROTOTYPE_DEFAULTS.items():
+                conn.execute("INSERT OR IGNORE INTO settings(key,value,description) VALUES(?,?,?)", (key,value,"Modo prototipo"))
+            conn.commit()
+        finally:
+            conn.close()
+
+    _prototype_schema_and_seed()
+
+    def query(sql: str, params=(), *, admin: bool = False) -> list[dict]:
+        conn = _prototype_conn()
+        try:
+            cur = conn.execute(sql, tuple(params))
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def one(sql: str, params=(), *, admin: bool = False) -> dict | None:
+        rows = query(sql, params, admin=admin)
+        return rows[0] if rows else None
+
+    def execute(sql: str, params=(), *, admin: bool = False) -> int:
+        # Compatibilidad con expresiones PostgreSQL que pudieran aparecer en logs.
+        sql = sql.replace("?::jsonb", "?")
+        conn = _prototype_conn()
+        try:
+            cur = conn.execute(sql, tuple(params))
+            conn.commit()
+            return int(cur.lastrowid or 0)
+        finally:
+            conn.close()
+
+    def get_setting(key: str, default: str = "") -> str:
+        row = one("SELECT value FROM settings WHERE key=?", (key,))
+        return str(row["value"]) if row else default
+
+    def set_setting(key: str, value: str) -> None:
+        execute(
+            """INSERT INTO settings(key,value,description) VALUES(?,?, 'Modo prototipo')
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            (key, str(value)),
+        )
+
+    def log_action(user_id: int | None, action: str, entity_type: str = "", entity_id: str = "", detail: dict | None = None) -> int:
+        return execute(
+            "INSERT INTO audit_log(user_id,action,entity_type,entity_id,detail_json,created_at) VALUES(?,?,?,?,?,?)",
+            (user_id, action, entity_type, str(entity_id or ""), json.dumps(detail or {}, ensure_ascii=False), iso_now()),
+        )
+
+    def set_request_context(user_id: int | None, role: str = "") -> None:
+        return None
+
+    def database_status() -> tuple[bool, str]:
+        return True, "Modo prototipo activo: PostgreSQL deshabilitado; no se intentó conexión externa."
+
+    def database_driver_name() -> str:
+        return "SQLite local (prototipo)"
+
+    def ensure_schema() -> None:
+        return None
+
+    def init_db(seed_demo: bool | None = None) -> None:
+        _prototype_schema_and_seed()
 
 st.set_page_config(
     page_title="CEI Nexus",
@@ -219,6 +500,12 @@ def local_guide_text() -> str:
 
 st.markdown(f"<style>{load_css()}</style>", unsafe_allow_html=True)
 
+if PROTOTYPE_MODE:
+    st.warning(
+        "🧪 MODO PROTOTIPO: la aplicación no se conecta a PostgreSQL. "
+        "Los datos visibles son demostrativos y los cambios se guardan solo en una base SQLite local temporal."
+    )
+
 
 def clean_filename(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "documento")
@@ -302,6 +589,12 @@ def login_screen() -> None:
             )
 
 
+if PROTOTYPE_MODE and "user" not in st.session_state:
+    # Acceso directo para revisar el diseño sin autenticación ni PostgreSQL.
+    _demo_admin = one("SELECT * FROM users WHERE username='admin'")
+    if _demo_admin:
+        st.session_state["user"] = _demo_admin
+
 if "user" not in st.session_state:
     login_screen()
     st.stop()
@@ -321,6 +614,8 @@ ROLE_PAGES = {
 with st.sidebar:
     st.markdown("## ⚖️ CEI Nexus")
     st.caption(f"Build {BUILD_ID}")
+    if PROTOTYPE_MODE:
+        st.caption("🧪 Prototipo · sin conexión PostgreSQL")
     st.caption(get_setting("committee_name", "Comité de Ética en Investigación"))
     st.markdown("---")
     st.markdown(f"**{user['full_name']}**")
@@ -329,7 +624,9 @@ with st.sidebar:
     current_page = st.radio("Navegación", pages, label_visibility="collapsed")
     st.markdown("---")
     st.caption("MVP clínico-regulatorio. La decisión final siempre corresponde al comité.")
-    if st.button("Cerrar sesión", use_container_width=True):
+    if PROTOTYPE_MODE:
+        st.caption("Acceso automático como Administrador para revisar todas las pantallas.")
+    elif st.button("Cerrar sesión", use_container_width=True):
         log_action(user["id"], "Cierre de sesión", "user", user["id"])
         st.session_state.clear()
         st.rerun()
@@ -1406,8 +1703,9 @@ def render_admin() -> None:
     with tabs[2]:
         st.markdown("#### Controles del MVP")
         checks = {
-            "DATABASE_URL configurada": bool(get_config("DATABASE_URL", "")),
-            "PostgreSQL validado": True,
+            "Modo prototipo sin PostgreSQL": PROTOTYPE_MODE,
+            "DATABASE_URL configurada (solo producción)": bool(get_config("DATABASE_URL", "")),
+            "PostgreSQL validado": False if PROTOTYPE_MODE else True,
             "Guía local incorporada": LOCAL_GUIDE.exists(),
             "S3/MinIO configurado": bool(get_config("S3_BUCKET", "")) and bool(get_config("S3_ENDPOINT_URL", "")),
             "Clave maestra documental configurada": bool(get_config("DOCUMENT_MASTER_KEY_B64", "")),
@@ -1417,8 +1715,8 @@ def render_admin() -> None:
         for label, ok in checks.items():
             st.write("✅" if ok else "❌", label)
         st.info(
-            "La versión utiliza PostgreSQL, cifrado documental en S3/MinIO y auditoría "
-            "encadenada. Antes del uso real deben validarse MFA, firma digital, backups, "
+            ("Esta ejecución está en modo PROTOTIPO y no utiliza PostgreSQL. " if PROTOTYPE_MODE else "La versión utiliza PostgreSQL. ")
+            + "Antes del uso real deben validarse PostgreSQL, cifrado documental, MFA, firma digital, backups, "
             "recuperación ante desastre, POE y permisos del usuario operativo."
         )
 
